@@ -161,7 +161,7 @@ MovieRec/
 * Real-time recommendation updates
 * Integration with streaming platform APIs
 * Enhanced visualization dashboards for business insights
-* Advanced hybrid models combining content-based filtering
+* Advanced hybrid models combining content-based and collaborative-based filtering
 
 ---
 
