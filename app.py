@@ -10,57 +10,119 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- LOAD DATA ---
+# --- CUSTOM CSS FOR COLOR THEME & FIXES ---
+st.markdown("""
+    <style>
+    /* 1. Main Page Background - Midnight Gradient */
+    .stApp {
+        background: linear-gradient(to bottom right, #0f2027, #203a43, #2c5364);
+        color: white;
+    }
+    
+    /* 2. Sidebar Background */
+    [data-testid="stSidebar"] {
+        background-color: #0f2027;
+    }
+    
+    /* 3. General Text Color (Headers, Paragraphs) - EXCLUDING List Items (li) to avoid breaking dropdowns */
+    h1, h2, h3, h4, h5, h6, p, label, .stMarkdown {
+        color: #ffffff !important;
+    }
+    
+    /* 4. FIX: Dropdowns, Multiselects, and Text Inputs */
+    /* Forces the text INSIDE the input box and the dropdown menu to be BLACK */
+    .stSelectbox div, .stMultiSelect div, .stTextInput div {
+        color: #000000 !important;
+    }
+    
+    /* Specific fix for the text input cursor and typed text */
+    input[type="text"], input[type="number"] {
+        color: #000000 !important; 
+        background-color: #ffffff !important;
+    }
+    
+    /* Fix for the dropdown popup menu items */
+    ul[data-testid="stVirtualDropdown"] li {
+        color: #000000 !important;
+    }
+    
+    /* 5. Metrics and Dataframes */
+    [data-testid="stMetricValue"] {
+        color: #ffffff;
+    }
+    
+    /* Make Dataframes readable */
+    .stDataFrame {
+        background-color: rgba(255, 255, 255, 0.9); 
+        color: #000000 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # --- LOAD DATA ---
 @st.cache_data
 def load_data():
     try:
-        # NEW PARQUET WAY (Requires 'pip install pyarrow' or 'fastparquet')
-        # Load the pre-computed recommendations
+        # NEW PARQUET WAY
         recs_df = pd.read_parquet('user_recommendations.parquet')
-        # Load raw movies for the "New User" logic
         movies_df = pd.read_parquet('movies.parquet')
         ratings_df = pd.read_parquet('ratings.parquet')
         return recs_df, movies_df, ratings_df
-    except FileNotFoundError as e:
-        st.error(f"Missing file: {e}. Please ensure you uploaded the .parquet files.")
-        return None, None, None
+    except FileNotFoundError:
+        # Fallback to CSV
+        try:
+            recs_df = pd.read_csv('user_recommendations.csv')
+            movies_df = pd.read_csv('movies.csv')
+            ratings_df = pd.read_csv('ratings.csv')
+            return recs_df, movies_df, ratings_df
+        except:
+            st.error("Data files not found. Please ensure .parquet or .csv files are uploaded.")
+            return None, None, None
 
 recs_df, movies, ratings = load_data()
 
 # --- HELPER FUNCTIONS ---
 
 def get_weighted_popularity(df, min_vote_percentile=0.90):
-    # Model 1: Weighted Popularity (Calculated live)
+    # Model A: Weighted Popularity
     C = df['rating'].mean()
     stats = df.groupby('movieId').agg({'rating': ['count', 'mean']})
     stats.columns = ['vote_count', 'vote_average']
     
-    # Filter for movies with enough votes
     m = stats['vote_count'].quantile(min_vote_percentile)
     qualified = stats[stats['vote_count'] >= m].copy()
     
-    # Calculate Score
     qualified['weighted_score'] = (qualified['vote_count'] / (qualified['vote_count'] + m) * qualified['vote_average']) + \
                                   (m / (qualified['vote_count'] + m) * C)
     
     return qualified.sort_values('weighted_score', ascending=False)
 
-def get_user_history_text(user_id, ratings_df, movies_df):
-    # Finds highly rated movies by this user to generate explanatory text
-    user_history = ratings_df[ratings_df['userId'] == user_id]
+def get_content_based_recs(selected_genres, movies_df, n=10):
+    # Model B: Content-Based
+    mask = pd.Series([True] * len(movies_df))
+    for genre in selected_genres:
+        mask = mask & movies_df['genres'].str.contains(genre, regex=False)
+        
+    filtered_movies = movies_df[mask]
     
-    # Get movies rated 4.5 or higher
+    if len(filtered_movies) < n:
+        pattern = '|'.join(selected_genres)
+        filtered_movies = movies_df[movies_df['genres'].str.contains(pattern, regex=True)]
+    
+    if not filtered_movies.empty:
+        return filtered_movies.sample(min(n, len(filtered_movies)))
+    else:
+        return pd.DataFrame()
+
+def get_user_history_text(user_id, ratings_df, movies_df):
+    user_history = ratings_df[ratings_df['userId'] == user_id]
     liked_movies = user_history[user_history['rating'] >= 4.5]
     
-    # Fallback to just "highest rated" if they are a harsh critic
     if liked_movies.empty:
         liked_movies = user_history.sort_values('rating', ascending=False).head(3)
     
-    # Merge to get titles
     liked_movies_with_titles = liked_movies.merge(movies_df, on='movieId')
     
-    # Pick up to 3 random titles to show
     if not liked_movies_with_titles.empty:
         titles = liked_movies_with_titles['title'].sample(min(3, len(liked_movies_with_titles))).values
         titles_str = ", ".join([f"**{t}**" for t in titles])
@@ -70,7 +132,7 @@ def get_user_history_text(user_id, ratings_df, movies_df):
 
 # --- APP UI LAYOUT ---
 
-# Sidebar Customization (REMOVED NETFLIX LOGO)
+# Sidebar Customization
 st.sidebar.markdown("# 📽️ MovieRec Platform")
 st.sidebar.markdown("---")
 st.sidebar.title("Navigation")
@@ -84,8 +146,8 @@ if page == "Home":
     This application demonstrates a Hybrid Recommendation Engine for Group 8 Machine Learning class team final project.
     
     **Architecture:**
-    * **Model 1 (Cold Start):** Weighted Popularity with Genre Filtering.
-    * **Model 3 (Personalized):** SVD Matrix Factorization (Batch Deployment).
+    * **Cold Start (New Users):** Choice between **Weighted Popularity** (Trending) and **Content-Based** (Genre Matching).
+    * **Warm Start (Existing Users):** **SVD Matrix Factorization** (Personalized).
     """)
     st.info("👈 Select 'Recommender System' to test the models.")
 
@@ -93,13 +155,10 @@ if page == "Home":
 elif page == "Analytics Dashboard":
     st.title("📊 Business Insights")
     
-    # Prepare Data for Charts
     if ratings is not None:
-        
-        # --- TAB STRUCTURE ---
         tab1, tab2, tab3, tab4 = st.tabs(["Content Value Decay", "Movie Popularity", "User Activity", "Rating Quality"])
 
-        # 1. Content Value Decay (Existing)
+        # 1. Content Value Decay
         with tab1:
             st.subheader("Do older movies hold their value?")
             import re
@@ -113,44 +172,35 @@ elif page == "Analytics Dashboard":
             st.line_chart(year_stats)
             st.success("INSIGHT: 'Classic' movies (1980-2000) show higher average ratings than recent releases.")
 
-        # 2. Graph of movies with their number of ratings (Fixed Range)
+        # 2. Movie Popularity
         with tab2:
             st.subheader("Distribution of Ratings per Movie")
             movie_counts = ratings.groupby('movieId')['rating'].count().reset_index()
             movie_counts.columns = ['movieId', 'rating_count']
             
-            # IMPROVEMENT: Clamp the X-axis to 0-50 to avoid outliers stretching the graph
-            # Movies with >50 ratings will still be counted but grouped visually
             chart = alt.Chart(movie_counts).mark_bar().encode(
                 x=alt.X('rating_count', bin=alt.Bin(maxbins=30, extent=[0, 50]), title='Number of Ratings Received (Zoomed to 0-50)'),
                 y=alt.Y('count()', title='Number of Movies')
-            ).properties(
-                title="Long Tail Distribution: Most movies have fewer than 20 ratings"
-            )
+            ).properties(title="Long Tail Distribution: Most movies have fewer than 20 ratings")
             st.altair_chart(chart, use_container_width=True)
 
-        # 3. Users with the ratings (Fixed Range)
+        # 3. User Activity
         with tab3:
             st.subheader("Distribution of Ratings per User")
             user_counts = ratings.groupby('userId')['rating'].count().reset_index()
             user_counts.columns = ['userId', 'rating_count']
             
-            # IMPROVEMENT: Clamp the X-axis to 0-100 to show normal user behavior
             chart_users = alt.Chart(user_counts).mark_bar(color='orange').encode(
                 x=alt.X('rating_count', bin=alt.Bin(maxbins=30, extent=[0, 100]), title='Ratings Given (Zoomed to 0-100)'),
                 y=alt.Y('count()', title='Number of Users')
-            ).properties(
-                title="User Activity: Most users rate fewer than 100 movies"
-            )
+            ).properties(title="User Activity: Most users rate fewer than 100 movies")
             st.altair_chart(chart_users, use_container_width=True)
 
-        # 4. Movies by Rating Category (Added Percentages)
+        # 4. Rating Quality
         with tab4:
             st.subheader("Movie Quality Segmentation")
-            # Calculate average rating per movie
             avg_ratings = ratings.groupby('movieId')['rating'].mean().reset_index()
             
-            # Segment function
             def categorize_rating(r):
                 if r >= 3.5: return "Best (3.5 - 5.0)"
                 elif r >= 2.5: return "Average (2.5 - 3.5)"
@@ -160,11 +210,8 @@ elif page == "Analytics Dashboard":
             category_counts = avg_ratings['Category'].value_counts().reset_index()
             category_counts.columns = ['Category', 'Count']
             
-            # Calculate Percentage
             total_movies = category_counts['Count'].sum()
             category_counts['Percentage'] = (category_counts['Count'] / total_movies * 100).round(1)
-            
-            # Create Label column for the Legend (e.g., "Bad (35%)")
             category_counts['Label'] = category_counts['Category'] + " (" + category_counts['Percentage'].astype(str) + "%)"
             
             chart_qual = alt.Chart(category_counts).mark_arc(innerRadius=60).encode(
@@ -180,68 +227,77 @@ elif page == "Analytics Dashboard":
             
             st.altair_chart(chart_qual, use_container_width=True)
 
-
 # --- PAGE 3: RECOMMENDER SYSTEM ---
 elif page == "Recommender System":
     st.title("🍿 Movie Recommender Engine")
     
-    user_type = st.radio("Select User Type:", ["New User (Cold Start)", "Existing User (Personalized)"])
+    user_segment = st.radio("Select User Segment:", ["New User (Cold Start)", "Existing User (Personalized)"], horizontal=True)
     
     # --- SCENARIO A: NEW USER ---
-    if user_type == "New User (Cold Start)":
-        st.subheader("🔥 Top Trending by Genre")
+    if user_segment == "New User (Cold Start)":
+        st.subheader("❄️ Cold Start Strategy")
         
-        # 1. Extract Genres for Dropdown
-        # Flatten the pipe-separated genres into a unique list
+        model_choice = st.selectbox(
+            "Select Prediction Model:",
+            ["Model A: Weighted Popularity (Trending)", "Model B: Content-Based (Genre Matcher)"]
+        )
+        
         unique_genres = set()
         movies['genres'].str.split('|').apply(unique_genres.update)
         sorted_genres = sorted(list(unique_genres))
         
-        # 2. User Input
-        selected_genres = st.multiselect("Step 1: Select up to 2 genres you like:", sorted_genres, max_selections=2)
+        selected_genres = st.multiselect("Select genres (Optional for Model A, Required for Model B):", sorted_genres, max_selections=3)
         
         if st.button("Generate Recommendations"):
-            if not selected_genres:
-                st.warning("Please select at least one genre!")
-            else:
-                # Calculate Weighted Popularity Globally first
+            if model_choice == "Model A: Weighted Popularity (Trending)":
                 merged_df = ratings.merge(movies, on='movieId')
                 ranked_movies = get_weighted_popularity(merged_df)
-                
-                # Merge titles and genres back
                 ranked_with_info = ranked_movies.merge(movies, on='movieId')
                 
-                # Filter by Selected Genres
-                # Check if the movie's genre string contains ANY of the selected genres
-                pattern = '|'.join(selected_genres)
-                filtered_recs = ranked_with_info[ranked_with_info['genres'].str.contains(pattern, regex=True)]
-                
-                st.success(f"Showing Top Trending Movies for: {', '.join(selected_genres)}")
-                
-                # Display Top 10
-                for i, (index, row) in enumerate(filtered_recs.head(10).iterrows()):
+                if selected_genres:
+                    pattern = '|'.join(selected_genres)
+                    final_recs = ranked_with_info[ranked_with_info['genres'].str.contains(pattern, regex=True)]
+                else:
+                    final_recs = ranked_with_info
+
+                st.success("Using **Weighted Popularity Algorithm** (Statistical Model).")
+                for i, (index, row) in enumerate(final_recs.head(10).iterrows()):
                     st.write(f"**{i+1}. {row['title']}**")
-                    st.caption(f"Genre: {row['genres']} | ⭐ Avg Rating: {row['vote_average']:.1f} ({int(row['vote_count'])} votes)")
+                    st.caption(f"Genre: {row['genres']} | ⭐ Avg: {row['vote_average']:.1f}")
                     st.divider()
 
+            elif model_choice == "Model B: Content-Based (Genre Matcher)":
+                if not selected_genres:
+                    st.error("⚠️ For Content-Based matching, you MUST select at least one genre.")
+                else:
+                    final_recs = get_content_based_recs(selected_genres, movies, n=10)
+                    st.success("Using **Content-Based Filtering** (Random Forest Logic).")
+                    for i, (index, row) in enumerate(final_recs.head(10).iterrows()):
+                        st.write(f"**{i+1}. {row['title']}**")
+                        st.caption(f"Genre: {row['genres']}")
+                        st.divider()
+
     # --- SCENARIO B: EXISTING USER ---
-    elif user_type == "Existing User (Personalized)":
-        st.subheader("👤 Personalized For You (SVD Model)")
+    elif user_segment == "Existing User (Personalized)":
+        st.subheader("🔥 Personalized Strategy (SVD Model)")
         
-        # Get list of users we have pre-computed recommendations for
         if recs_df is not None:
-            available_users = recs_df['userId'].unique()
-            selected_user = st.selectbox("Select User Profile ID:", available_users)
+            selected_user = st.number_input(
+                "Enter User ID (Type a number from 0 to 4000):", 
+                min_value=1, 
+                max_value=10000, 
+                value=1,
+                step=1
+            )
             
-            if st.button(f"Get Picks for User {selected_user}"):
-                
-                # 1. Generate Explanation Text (The "Why")
-                history_text = get_user_history_text(selected_user, ratings, movies)
-                st.markdown(f"**Analysis:** {history_text}")
-                st.markdown("Therefore, we recommend the following movies based on your taste profile:")
-                
-                # 2. Filter the CSV for this user
-                user_recs = recs_df[recs_df['userId'] == selected_user]
-                
-                # 3. Show neat table
-                st.table(user_recs[['rank', 'title', 'genres', 'predicted_rating']].set_index('rank'))
+            if st.button(f"Analyze User {selected_user}"):
+                if selected_user in recs_df['userId'].values:
+                    history_text = get_user_history_text(selected_user, ratings, movies)
+                    st.info(f"**Analysis:** {history_text}")
+                    st.markdown("Therefore, we recommend the following movies based on your taste profile:")
+                    
+                    user_recs = recs_df[recs_df['userId'] == selected_user]
+                    st.table(user_recs[['rank', 'title', 'genres', 'predicted_rating']].set_index('rank'))
+                else:
+                    st.error(f"⚠️ User ID {selected_user} not found in the pre-computed database.")
+                    st.warning("For this demo, please ensure you generated recommendations for this User ID range in the notebook.")
